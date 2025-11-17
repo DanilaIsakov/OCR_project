@@ -1,0 +1,30 @@
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.30.0
+Pillow>=10.0.0
+datasets>=2.14.0
+accelerate>=0.20.0
+evaluate>=0.4.0
+jiwer>=3.0.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+tqdm>=4.65.0
+python-Levenshtein>=0.21.0
+scipy>=1.10.0
+
+# Для сегментации строк с использованием модели blla
+# Устанавливается без зависимостей (--no-deps), так как требует PyTorch <1.11
+# Модуль pageseg работает с PyTorch 2.x
+kraken>=3.0.0
+
+# Опциональные зависимости для альтернативных методов сегментации
+# PaddleOCR - для сегментации с использованием PaddleOCR (опционально)
+# paddlepaddle>=2.0.0
+# paddleocr>=2.6.0
+
+# EasyOCR - для сегментации с использованием EasyOCR (опционально)
+# easyocr>=1.6.0
+
+# YOLOv8 - для сегментации с использованием YOLOv8 (опционально)
+# ultralytics>=8.0.0
+# huggingface_hub>=0.16.0
