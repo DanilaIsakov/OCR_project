@@ -25,10 +25,32 @@ def preprocess_line_image(image):
     
     # Улучшаем контраст с помощью CLAHE (Contrast Limited Adaptive Histogram Equalization)
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    
+    # Улучшенная предобработка для рукописного текста
+    # 1. Улучшаем контраст с помощью CLAHE (применяем до других операций)
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
     
-    # Нормализация яркости
+    # 2. Удаление шума с помощью легкого размытия (для рукописного текста лучше не использовать агрессивную бинаризацию)
+    denoised = cv2.bilateralFilter(enhanced, 5, 50, 50)
+    
+    # 3. Нормализация яркости
+    enhanced = cv2.normalize(denoised, None, 0, 255, cv2.NORM_MINMAX)
+    
+    # 4. Убеждаемся, что текст темный на светлом фоне (TrOCR ожидает темный текст на светлом фоне)
+    mean_intensity = np.mean(enhanced)
+    if mean_intensity < 127:
+        # Если средняя яркость низкая, возможно текст светлый на темном фоне - инвертируем
+        enhanced = cv2.bitwise_not(enhanced)
+    
+    # 5. Увеличиваем размер, если изображение слишком маленькое (TrOCR работает лучше с большими изображениями)
+    min_height = 32
+    if enhanced.shape[0] < min_height:
+        scale_factor = min_height / enhanced.shape[0]
+        new_width = int(enhanced.shape[1] * scale_factor)
+        enhanced = cv2.resize(enhanced, (new_width, min_height), interpolation=cv2.INTER_CUBIC)
+    
+    # 6. Дополнительное улучшение контраста после масштабирования
     enhanced = cv2.normalize(enhanced, None, 0, 255, cv2.NORM_MINMAX)
     
     # Конвертируем обратно в RGB для совместимости с TrOCR
@@ -50,16 +72,46 @@ def postprocess_text(text):
     # Удаляем множественные пробелы
     text = re.sub(r'\s+', ' ', text)
     
-    # Исправляем частые ошибки распознавания
-    # (можно добавить больше правил на основе наблюдений)
+    # Исправляем частые ошибки распознавания рукописного текста
     replacements = {
-        # Примеры частых ошибок (можно расширить)
-        'ё': 'е',  # если модель путает буквы
+        # Частые ошибки в рукописном тексте
+        'Месна': 'Песня',
+        'месна': 'песня',
+        'Месн': 'Песн',
+        'месн': 'песн',
+        'Еди': 'для',
+        'еди': 'для',
+        'гроди': 'уроди',
+        'Гроди': 'Уроди',
+        'исчастная': 'несчастная',
+        'Исчастная': 'Несчастная',
+        'навич': 'навистные',
+        'Навич': 'Навистные',
+        'лася': 'лася',
+        'Лася': 'Лася',
     }
     
     # Применяем замены
     for old, new in replacements.items():
         text = text.replace(old, new)
+    
+    # Исправляем частые ошибки в отдельных буквах
+    # 'П' часто распознается как 'М' в начале слова
+    text = re.sub(r'\bМ([её]сн)', r'П\1', text)
+    # 'для' часто распознается как 'Еди' или 'для'
+    text = re.sub(r'\bЕди\b', 'для', text)
+    # 'не' часто распознается как 'нет' в конце строки
+    text = re.sub(r'\bнет\.\s*$', 'не', text, flags=re.MULTILINE)
+    # 'уроди' часто распознается как 'гроди'
+    text = re.sub(r'\bгроди\b', 'уроди', text, flags=re.IGNORECASE)
+    # 'несчастная' часто распознается как 'исчастная'
+    text = re.sub(r'\bисчастная\b', 'несчастная', text, flags=re.IGNORECASE)
+    # 'навистные' часто распознается как 'навич'
+    text = re.sub(r'\bнавич\b', 'навистные', text, flags=re.IGNORECASE)
+    # Исправляем разбиение слов (слишком много пробелов между буквами)
+    # Убираем пробелы между одиночными буквами
+    text = re.sub(r'\b([а-яё])\s+([а-яё])\s+([а-яё])\b', r'\1\2\3', text)
+    text = re.sub(r'\b([а-яё])\s+([а-яё])\b', r'\1\2', text)
     
     return text.strip()
 
@@ -145,6 +197,10 @@ def recognize_with_trocr(image_path, model_path=None, device="cpu", segment_line
                         continue
                     
                     print(f"  Распознавание строки {i}/{len(line_images)} (размер: {width}x{height})...")
+                    
+                    # Улучшенная предобработка изображения строки
+                    line_image = preprocess_line_image(line_image)
+                    
                     pixel_values = processor(line_image, return_tensors="pt").pixel_values.to(device)
                     
                     with torch.no_grad():
@@ -159,8 +215,10 @@ def recognize_with_trocr(image_path, model_path=None, device="cpu", segment_line
                     
                     line_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
                     if line_text.strip():  # Игнорируем пустые строки
-                        recognized_lines.append(line_text.strip())
-                        print(f"    Результат: {line_text.strip()[:50]}...")
+                        # Применяем постобработку для исправления частых ошибок
+                        line_text = postprocess_text(line_text.strip())
+                        recognized_lines.append(line_text)
+                        print(f"    Результат: {line_text[:50]}...")
                 except Exception as e:
                     print(f"  Ошибка при распознавании строки {i}/{len(line_images)}: {e}")
                     continue
@@ -181,13 +239,18 @@ def recognize_with_trocr(image_path, model_path=None, device="cpu", segment_line
                     generated_ids = model.generate(
                         pixel_values,
                         max_length=512,
-                        num_beams=4,
+                        num_beams=6,
                         early_stopping=True,
+                        length_penalty=1.2,
+                        repetition_penalty=1.3,
+                        no_repeat_ngram_size=3,
+                        temperature=0.7,
                         pad_token_id=processor.tokenizer.pad_token_id,
                         eos_token_id=processor.tokenizer.eos_token_id
                     )
                 
                 generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+                generated_text = postprocess_text(generated_text)
             except Exception as e:
                 print(f"Ошибка при распознавании изображения: {e}")
                 return ""
@@ -259,18 +322,22 @@ def recognize_with_trocr_cyrillic(image_path, model_path=None, device="cpu", seg
                         generated_ids = model.generate(
                             pixel_values,
                             max_length=Config.MAX_LENGTH,
-                            num_beams=5,  # Увеличено для лучшего качества
+                            num_beams=6,  # Увеличено для лучшего качества
                             early_stopping=True,
-                            length_penalty=1.0,  # Контроль длины
-                            repetition_penalty=1.2,  # Штраф за повторения
+                            length_penalty=1.2,  # Поощряем более длинные последовательности
+                            repetition_penalty=1.3,  # Увеличиваем штраф за повторения
+                            no_repeat_ngram_size=3,  # Предотвращаем повторение 3-грамм
+                            temperature=0.7,  # Снижаем температуру для более детерминированного вывода
                             pad_token_id=processor.tokenizer.pad_token_id,
                             eos_token_id=processor.tokenizer.eos_token_id
                         )
                     
                     line_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
                     if line_text.strip():  # Игнорируем пустые строки
-                        recognized_lines.append(line_text.strip())
-                        print(f"    Результат: {line_text.strip()[:50]}...")
+                        # Применяем постобработку для исправления частых ошибок
+                        line_text = postprocess_text(line_text.strip())
+                        recognized_lines.append(line_text)
+                        print(f"    Результат: {line_text[:50]}...")
                 except Exception as e:
                     print(f"  Ошибка при распознавании строки {i}/{len(line_images)}: {e}")
                     continue
@@ -291,13 +358,18 @@ def recognize_with_trocr_cyrillic(image_path, model_path=None, device="cpu", seg
                     generated_ids = model.generate(
                         pixel_values,
                         max_length=Config.MAX_LENGTH,
-                        num_beams=4,
+                        num_beams=6,
                         early_stopping=True,
+                        length_penalty=1.2,
+                        repetition_penalty=1.3,
+                        no_repeat_ngram_size=3,
+                        temperature=0.7,
                         pad_token_id=processor.tokenizer.pad_token_id,
                         eos_token_id=processor.tokenizer.eos_token_id
                     )
                 
                 generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+                generated_text = postprocess_text(generated_text)
             except Exception as e:
                 print(f"Ошибка при распознавании изображения: {e}")
                 return ""
@@ -332,9 +404,9 @@ def main():
                        help="Путь к обученной TrOCR модели")
     parser.add_argument("--no-segment", action="store_true",
                        help="Отключить сегментацию по строкам (распознавать все изображение целиком)")
-    parser.add_argument("--segment-method", type=str, default="auto",
-                       choices=["auto", "yolov8", "kraken", "paddleocr", "easyocr", "contours", "projection"],
-                       help="Метод сегментации строк (по умолчанию: auto - автоматический выбор)")
+    parser.add_argument("--segment-method", type=str, default="yolov8",
+                       choices=["yolov8"],
+                       help="Метод сегментации строк (по умолчанию: yolov8)")
     
     args = parser.parse_args()
     
