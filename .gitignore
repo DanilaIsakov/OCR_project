@@ -49,3 +49,7 @@ segmented_lines/
 .DS_Store
 Thumbs.db
 
+# FineTuning folder
+FineTuning/
+finetuning/
+
